@@ -24,8 +24,11 @@ jobs:
       - name: Unzip sources
         run: |
           set -euo pipefail
-          unzip -o -q bachata-s4-drivers-gen8-v5-optimized.zip
-          cp -a bachata-s4-drivers-gen8-v5/. .
+          f="$(ls ./*.zip | head -n1)"
+          echo "using $f"
+          unzip -o -q "$f"
+          d="$(unzip -Z1 "$f" | sed -n "1p" | cut -d/ -f1)"
+          cp -a "$d"/. .
           chmod +x scripts/*.sh
           ls
 
