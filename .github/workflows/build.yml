@@ -1,0 +1,85 @@
+name: build-gen8
+
+on:
+  workflow_dispatch:
+    inputs:
+      lto:
+        description: "LTO (experimental)"
+        type: boolean
+        default: false
+      march:
+        description: "Optional -march, e.g. armv8.2-a (empty = generic)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip sources
+        run: |
+          set -euo pipefail
+          unzip -o -q bachata-s4-drivers-gen8-v5-optimized.zip
+          cp -a bachata-s4-drivers-gen8-v5/. .
+          chmod +x scripts/*.sh
+          ls
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture arm64
+          if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+            sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          if [[ -f /etc/apt/sources.list ]]; then
+            sudo sed -i -E 's/^deb (http|https)/deb [arch=amd64] \1/' /etc/apt/sources.list || true
+          fi
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          {
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${codename} main restricted universe multiverse"
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${codename}-updates main restricted universe multiverse"
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${codename}-security main restricted universe multiverse"
+          } | sudo tee /etc/apt/sources.list.d/ubuntu-ports.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            git ninja-build python3-pip python3-mako python3-setuptools \
+            glslang-tools flex bison pkg-config unzip file binutils \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libz-dev:arm64 libexpat1-dev:arm64 \
+            libx11-dev:arm64 libxcb1-dev:arm64 libx11-xcb-dev:arm64 \
+            libxcb-dri3-dev:arm64 libxcb-present-dev:arm64 \
+            libxcb-xfixes0-dev:arm64 libxcb-randr0-dev:arm64 \
+            libxcb-shm0-dev:arm64 libxcb-sync-dev:arm64 \
+            libxshmfence-dev:arm64
+          sudo pip3 install --break-system-packages 'meson>=1.4.0'
+          meson --version
+
+      - name: Build and publish
+        env:
+          FORCE: "1"
+          ENABLE_LTO: ${{ inputs.lto && '1' || '0' }}
+          TARGET_MARCH: ${{ inputs.march }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(./scripts/build-driver.sh gen8 2> >(tee /tmp/err.txt >&2) | tee /tmp/out.txt | tail -n1)"
+          code=$?
+          set -e
+          if [[ "$code" -ne 0 ]]; then
+            tail -n 120 /tmp/out.txt || true
+            cat /tmp/err.txt || true
+            tail -n 120 work/gen8/build/meson-logs/meson-log.txt || true
+            exit "$code"
+          fi
+          [[ -f "$out" && "$out" == *.zip ]] || { echo "no zip produced: $out"; exit 1; }
+          tag="gen8-run${{ github.run_number }}"
+          opts="$(unzip -p "$out" meta.json | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("buildOptions") or []) or "none")')"
+          gh release create "$tag" "$out" --title "Turnip gen8 ($tag)" --notes "Build options: $opts"
